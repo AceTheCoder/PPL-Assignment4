@@ -13,7 +13,9 @@ from Frame import Frame
 from abc import ABC, abstractmethod
 from functools import reduce
 
+
 class CodeGenerator(Utils):
+
     def __init__(self):
         self.libName = "io"
 
@@ -39,6 +41,7 @@ class CodeGenerator(Utils):
         gc = CodeGenVisitor(ast, gl, dir_)
         gc.visit(ast, None)
 
+
 class ClassType(Type):
     def __init__(self, cname):
         #cname: String
@@ -50,6 +53,7 @@ class ClassType(Type):
     def accept(self, v, param):
         return v.visitClassType(self, param)
 
+
 class SubBody():
     def __init__(self, frame, sym):
         #frame: Frame
@@ -57,6 +61,7 @@ class SubBody():
 
         self.frame = frame
         self.sym = sym
+
 
 class Access():
     def __init__(self, frame, sym, isLeft, isFirst):
@@ -70,8 +75,10 @@ class Access():
         self.isLeft = isLeft
         self.isFirst = isFirst
 
+
 class Val(ABC):
     pass
+
 
 class Index(Val):
     def __init__(self, value):
@@ -79,13 +86,18 @@ class Index(Val):
 
         self.value = value
 
+
 class CName(Val):
     def __init__(self, value):
         #value: String
 
         self.value = value
 
+
 class CodeGenVisitor(BaseVisitor, Utils):
+
+    var_status = ["Global", "Parameter", "Local"]
+
     def __init__(self, astTree, env, dir_):
         #astTree: AST
         #env: List[Symbol]
@@ -111,7 +123,7 @@ class CodeGenVisitor(BaseVisitor, Utils):
                 declList = [Symbol(x.name.name, MType([y.varType for y in x.param], x.returnType),
                                      CName(self.className))] + declList
             else:
-                symbol = self.visit(x, (SubBody(None, None), True))
+                symbol = self.visit(x, (SubBody(None, None), "Global"))
                 declList = [symbol] + declList
 
         e = SubBody(None, declList)
@@ -147,15 +159,20 @@ class CodeGenVisitor(BaseVisitor, Utils):
 
         var_List = SubBody(frame, glenv)
         for x in consdecl.param:
-            var_List = self.visit(x, (var_List, False))
-        for x in list(filter(lambda decl: type(decl) is VarDecl, consdecl.body.member)):
-            var_List = self.visit(x, (var_List, False))
+            var_List = self.visit(x, (var_List, "Parameter"))
+        # for x in list(filter(lambda decl: type(decl) is VarDecl, consdecl.body.member)):
+        #     var_List = self.visit(x, (var_List, False))
         # body = consdecl.body
 
         self.emit.printout(self.emit.emitLABEL(frame.getStartLabel(), frame))
 
-        for x in list(filter(lambda decl: type(decl) is not VarDecl, consdecl.body.member)):
-            self.visit(x, var_List)
+        # for x in list(filter(lambda decl: type(decl) is not VarDecl, consdecl.body.member)):
+        #     self.visit(x, var_List)
+        for x in consdecl.body.member:
+            if type(x) is not VarDecl:
+                self.visit(x, var_List)
+            else:
+                var_List = self.visit(x, (var_List, "Local"))
         # Generate code for statements
         if isInit:
             self.emit.printout(self.emit.emitREADVAR("this", ClassType(self.className), 0, frame))
@@ -178,17 +195,25 @@ class CodeGenVisitor(BaseVisitor, Utils):
         return SubBody(None, [Symbol(ast.name, MType(list(), ast.returnType), CName(self.className))] + subctxt.sym)
 
     def visitVarDecl(self, ast, o):
-        ctxt, isGlobal = o
+        ctxt, location = o
         frame = ctxt.frame
         varName = ast.variable
         varType = ast.varType
-        if isGlobal:
+        if location == "Global":
             self.emit.printout(self.emit.emitATTRIBUTE(varName, varType, False, ""))
             return Symbol(ast.variable, ast.varType)
-        idx = frame.getNewIndex()
-        self.emit.printout(self.emit.emitVAR(idx, varName, varType, frame.getStartLabel(),
-                                             frame.getEndLabel(), frame))
-        return SubBody(frame, [Symbol(varName, varType, Index(idx))] + ctxt.sym)
+        elif location == "Local":
+            idx = frame.getNewIndex()
+            labelStart = frame.getNewLabel()
+            self.emit.printout(self.emit.emitVAR(idx, varName, varType, labelStart,
+                                                 frame.getEndLabel(), frame))
+            self.emit.printout(self.emit.emitLABEL(labelStart,frame))
+            return SubBody(frame, [Symbol(varName, varType, Index(idx))] + ctxt.sym)
+        else:
+            idx = frame.getNewIndex()
+            self.emit.printout(self.emit.emitVAR(idx, varName, varType, frame.getStartLabel(),
+                                                 frame.getEndLabel(), frame))
+            return SubBody(frame, [Symbol(varName, varType, Index(idx))] + ctxt.sym)
 
     # Visit statements:
     def visitBlock(self, ast, o):
@@ -197,11 +222,12 @@ class CodeGenVisitor(BaseVisitor, Utils):
         nenv = o.sym
         var_List = SubBody(frame, nenv)
         frame.enterScope(False)
-        for x in list(filter(lambda stmt: type(stmt) is VarDecl, ast.member)):
-            var_List = self.visit(x, (var_List, False))
         self.emit.printout(self.emit.emitLABEL(frame.getStartLabel(), frame))
-        for x in list(filter(lambda decl: type(decl) is not VarDecl, ast.member)):
-            self.visit(x, var_List)
+        for x in ast.member:
+            if type(x) is not VarDecl:
+                self.visit(x, var_List)
+            else:
+                var_List = self.visit(x, (var_List, False))
         self.emit.printout(self.emit.emitLABEL(frame.getEndLabel(), frame))
         frame.exitScope()
 
