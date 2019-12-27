@@ -5,6 +5,9 @@
  *   This file provides a simple version of code generator
  *
 '''
+
+# 1752063
+# Ngo Nguyen Duy An
 from Utils import *
 from StaticCheck import *
 from StaticError import *
@@ -141,13 +144,14 @@ class CodeGenVisitor(BaseVisitor, Utils):
         isInit = consdecl.returnType is None
         isMain = consdecl.name.name == "main" and len(consdecl.param) == 0 and type(consdecl.returnType) is VoidType
         returnType = VoidType() if isInit else consdecl.returnType
+        isProc = type(returnType) is VoidType
         methodName = "<init>" if isInit else consdecl.name.name
-        intype = [ArrayPointerType(StringType())] if isMain else list()
+        intype = [ArrayPointerType(StringType())] if isMain else [x.varType for x in consdecl.param]
         mtype = MType(intype, returnType)
 
         self.emit.printout(self.emit.emitMETHOD(methodName, mtype, not isInit, frame))
 
-        frame.enterScope(True)
+        frame.enterScope(isProc)
 
         # Generate code for parameter declarations
         if isInit:
@@ -160,27 +164,23 @@ class CodeGenVisitor(BaseVisitor, Utils):
         var_List = SubBody(frame, glenv)
         for x in consdecl.param:
             var_List = self.visit(x, (var_List, "Parameter"))
-        # for x in list(filter(lambda decl: type(decl) is VarDecl, consdecl.body.member)):
-        #     var_List = self.visit(x, (var_List, False))
-        # body = consdecl.body
 
         self.emit.printout(self.emit.emitLABEL(frame.getStartLabel(), frame))
 
-        # for x in list(filter(lambda decl: type(decl) is not VarDecl, consdecl.body.member)):
-        #     self.visit(x, var_List)
-        for x in consdecl.body.member:
-            if type(x) is not VarDecl:
-                self.visit(x, var_List)
-            else:
-                var_List = self.visit(x, (var_List, "Local"))
         # Generate code for statements
         if isInit:
             self.emit.printout(self.emit.emitREADVAR("this", ClassType(self.className), 0, frame))
             self.emit.printout(self.emit.emitINVOKESPECIAL(frame))
         # list(map(lambda x: self.visit(x, SubBody(frame, glenv)), body.member))
 
+        for x in consdecl.body.member:
+            if type(x) is not VarDecl:
+                self.visit(x, var_List)
+            else:
+                var_List = self.visit(x, (var_List, "Local"))
+
         self.emit.printout(self.emit.emitLABEL(frame.getEndLabel(), frame))
-        if type(returnType) is VoidType:
+        if isProc:
             self.emit.printout(self.emit.emitRETURN(VoidType(), frame))
         self.emit.printout(self.emit.emitENDMETHOD(frame))
         frame.exitScope()
@@ -207,7 +207,7 @@ class CodeGenVisitor(BaseVisitor, Utils):
             labelStart = frame.getNewLabel()
             self.emit.printout(self.emit.emitVAR(idx, varName, varType, labelStart,
                                                  frame.getEndLabel(), frame))
-            self.emit.printout(self.emit.emitLABEL(labelStart,frame))
+            self.emit.printout(self.emit.emitLABEL(labelStart, frame))
             return SubBody(frame, [Symbol(varName, varType, Index(idx))] + ctxt.sym)
         else:
             idx = frame.getNewIndex()
@@ -243,10 +243,6 @@ class CodeGenVisitor(BaseVisitor, Utils):
             self.emit.printout(self.emit.emitIFTRUE(labelThen, frame))
             self.emit.printout(self.emit.emitGOTO(labelExit, frame))
             self.emit.printout(self.emit.emitLABEL(labelThen, frame))
-            # hasReturnStmt = True in [self.visit(x, o) for x in [ast.thenStmt]] and hasReturnStmt
-            # if type(ast.thenStmt) is Block:
-            #     [self.visit(x, o) for x in ast.thenStmt.member]
-            # else:
             self.visit(ast.thenStmt, o)
         else:  # has else stmt
             self.emit.printout(self.emit.emitIFTRUE(labelThen, frame))
@@ -270,7 +266,8 @@ class CodeGenVisitor(BaseVisitor, Utils):
         labelExit = frame.getNewLabel()
         frame.enterLoop()
         self.emit.printout(self.emit.emitLABEL(labelLoop, frame))
-        [self.visit(x, o) for x in ast.sl]
+        list(map(lambda x: self.visit(x, o) if type(x) is not VarDecl else self.visit(x, (o, "Local")), ast.sl))
+
         self.emit.printout(self.emit.emitLABEL(frame.getContinueLabel(), frame))
         expCode, expType = self.visit(ast.exp, Access(frame, nenv, False, True))
         self.emit.printout(expCode)
@@ -314,6 +311,18 @@ class CodeGenVisitor(BaseVisitor, Utils):
         frame = ctxt.frame
         self.emit.printout(self.emit.emitGOTO(frame.getContinueLabel(), frame))
 
+    def visitReturn(self, ast, o):
+        ctxt = o
+        frame = ctxt.frame
+        nenv = ctxt.sym
+        retType = frame.returnType
+        if not type(retType) is VoidType:
+            expCode, expType = self.visit(ast.expr, Access(frame, nenv, False, True))
+            if type(retType) is FloatType and type(expType) is IntType:
+                expCode = expCode + self.emit.emitI2F(frame)
+            self.emit.printout(expCode)
+        self.emit.printout(self.emit.emitRETURN(retType, frame))
+
     # Visit expression
     def visitBinaryOp(self, ast, o):
         ctxt = o
@@ -335,6 +344,7 @@ class CodeGenVisitor(BaseVisitor, Utils):
                 returnCode = expCode + self.emit.emitDUP(frame) + lhsCode
                 return returnCode, lhsType
         else:
+            is_statement = type(o) is SubBody
             leftCode, leftType = self.visit(ast.left, Access(frame, nenv, False, True))
             rightCode, rightType = self.visit(ast.right, Access(frame, nenv, False, True))
             expr_type = FloatType() if type(leftType) is not type(rightType) else leftType
@@ -344,27 +354,58 @@ class CodeGenVisitor(BaseVisitor, Utils):
                 if type(rightType) is IntType:
                     rightCode = rightCode + self.emit.emitI2F(frame)
             if op in ["+", "-"]:
-                return leftCode + rightCode + self.emit.emitADDOP(op, expr_type, frame), expr_type
+                code = leftCode + rightCode + self.emit.emitADDOP(op, expr_type, frame)
             elif op in ["*", "/"]:
-                return leftCode + rightCode + self.emit.emitMULOP(op, expr_type, frame), expr_type
+                code = leftCode + rightCode + self.emit.emitMULOP(op, expr_type, frame)
             elif op == "%":
-                return leftCode + rightCode + self.emit.emitMOD(frame), IntType()
+                code = leftCode + rightCode + self.emit.emitMOD(frame)
             elif op == "||":
-                return leftCode + rightCode + self.emit.emitOROP(frame), BoolType()
+                labelTrue = frame.getNewLabel()
+                labelEnd = frame.getNewLabel()
+                code = leftCode + self.emit.emitIFTRUE(labelTrue, frame)
+                code += rightCode + self.emit.emitIFTRUE(labelTrue, frame)
+                code += self.emit.emitPUSHICONST(0, frame)
+                code += self.emit.emitGOTO(labelEnd, frame)
+                code += self.emit.emitLABEL(labelTrue, frame)
+                code += self.emit.emitPUSHICONST(1, frame)
+                code += self.emit.emitLABEL(labelEnd, frame)
+                # code = leftCode + rightCode + self.emit.emitOROP(frame)
             elif op == "&&":
-                return leftCode + rightCode + self.emit.emitANDOP(frame), BoolType()
+                labelEnd = frame.getNewLabel()
+                labelFalse = frame.getNewLabel()
+                code = leftCode + self.emit.emitIFFALSE(labelFalse, frame)
+                code += rightCode + self.emit.emitIFFALSE(labelFalse, frame)
+                code += self.emit.emitPUSHICONST(1, frame)
+                code += self.emit.emitGOTO(labelEnd, frame)
+                code += self.emit.emitLABEL(labelFalse, frame)
+                code += self.emit.emitPUSHICONST(0, frame)
+                code += self.emit.emitLABEL(labelEnd, frame)
+                # code = leftCode + rightCode + self.emit.emitANDOP(frame)
             else:
-                return leftCode + rightCode + self.emit.emitREOP(op, expr_type, frame), BoolType()
+                code = leftCode + rightCode + self.emit.emitREOP(op, expr_type, frame)
+                expr_type = BoolType()
+
+            if is_statement:
+                self.emit.printout(code)
+                self.emit.printout(self.emit.emitPOP(frame))
+            else:
+                return code, expr_type
 
     def visitUnaryOp(self, ast, o):
         ctxt = o
         frame = ctxt.frame
         op = ast.op
-        expCode, expType = self.visit(ast.body, o)
+        nenv = ctxt.sym
+        expCode, expType = self.visit(ast.body,  Access(frame, nenv, False, True))
         if op == "!":
-            return expCode + self.emit.emitNOT(BoolType(), frame), BoolType()
+            expCode = expCode + self.emit.emitNOT(BoolType(), frame)
         else:
-            return expCode + self.emit.emitNEGOP(expType, frame), expType
+            expCode = expCode + self.emit.emitNEGOP(expType, frame)
+        if type(o) is SubBody:
+            self.emit.printout(expCode)
+            self.emit.printout(self.emit.emitPOP(frame))
+        else:
+            return expCode, expType
 
     def visitCallExpr(self, ast, o):
         #ast: CallExpr
@@ -374,48 +415,71 @@ class CodeGenVisitor(BaseVisitor, Utils):
         nenv = ctxt.sym
         sym = self.lookup(ast.method.name, nenv, lambda x: x.name)
         cname = sym.value.value
-    
         ctype = sym.mtype
+        paramTypes = ctype.partype
 
-        in_ = ("", list())
+        code = ""
+        idx = 0
         for x in ast.param:
-            str1, typ1 = self.visit(x, Access(frame, nenv, False, True))
-            in_ = (in_[0] + str1, in_[1].append(typ1))
-        self.emit.printout(in_[0])
-        self.emit.printout(self.emit.emitINVOKESTATIC(cname + "/" + ast.method.name, ctype, frame))
+            paraCode, paraType = self.visit(x, Access(frame, nenv, False, True))
+            if type(paramTypes[idx]) is FloatType and type(paraType) is IntType:
+                paraCode = paraCode + self.emit.emitI2F(frame)
+            code = code + paraCode
+            idx += 1
+
+        code = code + self.emit.emitINVOKESTATIC(cname + "/" + ast.method.name, ctype, frame)
+        # self.emit.printout(self.emit.emitINVOKESTATIC(cname + "/" + ast.method.name, ctype, frame))
+        if type(o) is SubBody:
+            self.emit.printout(code)
+        else:
+            return code, ctype.rettype
 
     def visitId(self, ast, o):
         ctxt = o
         frame = ctxt.frame
         symbols = ctxt.sym
-        isLeft = ctxt.isLeft
-        isFirst = ctxt.isFirst
-        sym = self.lookup(ast.name, symbols, lambda x: x.name)
-        # recover status of stack in frame
-        if not isFirst and isLeft:
-            frame.push()
-        elif not isFirst and not isLeft:
-            frame.pop()
-        emitType = sym.mtype
-        if sym.value is None:  # not index -> global var - static field
-            if isLeft:
-                retCode = self.emit.emitPUTSTATIC(self.className + "/" + sym.name, emitType, frame)
-            else:
+        if type(o) is SubBody:
+            sym = self.lookup(ast.name, symbols, lambda x: x.name)
+            emitType = sym.mtype
+            if sym.value is None:  # not index -> global var - static field
                 retCode = self.emit.emitGETSTATIC(self.className + "/" + sym.name, emitType, frame)
-        else:
-            if isLeft:
-                retCode = self.emit.emitWRITEVAR(sym.name, emitType, sym.value.value, frame)
             else:
                 retCode = self.emit.emitREADVAR(sym.name, emitType, sym.value.value, frame)
-        return retCode, sym.mtype
+            self.emit.printout(retCode)
+            self.emit.printout(self.emit.emitPOP(frame))
+        else:
+            isLeft = ctxt.isLeft
+            isFirst = ctxt.isFirst
+            sym = self.lookup(ast.name, symbols, lambda x: x.name)
+            # recover status of stack in frame
+            if not isFirst and isLeft:
+                frame.push()
+            elif not isFirst and not isLeft:
+                frame.pop()
+            emitType = sym.mtype
+            if sym.value is None:  # not index -> global var - static field
+                if isLeft:
+                    retCode = self.emit.emitPUTSTATIC(self.className + "/" + sym.name, emitType, frame)
+                else:
+                    retCode = self.emit.emitGETSTATIC(self.className + "/" + sym.name, emitType, frame)
+            else:
+                if isLeft:
+                    retCode = self.emit.emitWRITEVAR(sym.name, emitType, sym.value.value, frame)
+                else:
+                    retCode = self.emit.emitREADVAR(sym.name, emitType, sym.value.value, frame)
+            return retCode, sym.mtype
 
     def visitIntLiteral(self, ast, o):
         #ast: IntLiteral
         #o: Any
-
         ctxt = o
         frame = ctxt.frame
-        return self.emit.emitPUSHICONST(ast.value, frame), IntType()
+        code = self.emit.emitPUSHICONST(ast.value, frame)
+        if type(o) is SubBody:
+            self.emit.printout(code)
+            self.emit.printout(self.emit.emitPOP(frame))
+        else:
+            return code, IntType()
 
     def visitFloatLiteral(self, ast, o):
         #ast: FloatLiteral
@@ -423,14 +487,29 @@ class CodeGenVisitor(BaseVisitor, Utils):
 
         ctxt = o
         frame = ctxt.frame
-        return self.emit.emitPUSHFCONST(str(ast.value), frame), FloatType()
+        code = self.emit.emitPUSHFCONST(str(ast.value), frame)
+        if type(o) is SubBody:
+            self.emit.printout(code)
+            self.emit.printout(self.emit.emitPOP(frame))
+        else:
+            return code, FloatType()
 
     def visitStringLiteral(self, ast, o):
         ctxt = o
         frame = ctxt.frame
-        return self.emit.emitPUSHCONST('''"''' + str(ast.value) + '''"''', StringType(), frame), StringType()
+        code = self.emit.emitPUSHCONST('''"''' + str(ast.value) + '''"''', StringType(), frame)
+        if type(o) is SubBody:
+            self.emit.printout(code)
+            self.emit.printout(self.emit.emitPOP(frame))
+        else:
+            return code, StringType()
 
     def visitBooleanLiteral(self, ast, o):
         ctxt = o
         frame = ctxt.frame
-        return self.emit.emitPUSHICONST(str(ast.value).lower(), frame), BoolType()
+        code = self.emit.emitPUSHICONST(str(ast.value).lower(), frame)
+        if type(o) is SubBody:
+            self.emit.printout(code)
+            self.emit.printout(self.emit.emitPOP(frame))
+        else:
+            return code, BoolType()
